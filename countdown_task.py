@@ -21,6 +21,13 @@ USER_TEMPLATE = (
 RESPONSE_PROMPT = "Let me solve this step by step.\n<think>"
 
 
+"""
+示例数据如下:
+```
+Question: Given 1 2 3 4 and a target number 11. Show an expression that evaluates to 11.
+Answer: 1 + (2 * 3) + 4
+```
+"""
 class CountdownTasksDataset(Dataset):
     """Prepare Countdown Tasks for training"""
 
@@ -56,11 +63,24 @@ class CountdownTasksDataset(Dataset):
             ],
             RESPONSE_PROMPT,
         )
+        #print(f"prefix:\n {prefix}")
+        """
+        prefix的示例输出如下, 注意只给了个think的开头：
+
+        <|im_start|>system
+        You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.<|im_end|>
+        <|im_start|>user
+        Using the numbers [16 22 85], create an equation that equals 79. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.<|im_end|>
+        <|im_start|>assistant
+        Let me solve this step by step.
+        <think>
+        """
+
         tokens = self.tokenizer.tokenize(prefix)
         return {
-            "prefix": prefix,
-            "prefix_tokens": tokens.tokens,
-            "prefix_token_ids": tokens.ids,
+            "prefix": prefix, # text
+            "prefix_tokens": tokens.tokens, # token
+            "prefix_token_ids": tokens.ids, # token id
         }
 
     @staticmethod

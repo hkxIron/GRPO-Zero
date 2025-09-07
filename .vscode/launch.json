@@ -1,0 +1,26 @@
+{
+    // pip install torch==2.5.1
+    // "--model_name_or_path", "/home/hkx/data/work/hf_data_and_model/models/MoZhang96/TinyStories-LLaMA2-20M-256h-4l-GQA/",
+    // "--model_name_or_path", "/home/hkx/data/work/hf_data_and_model/models/Qwen/Qwen2.5-0.5B-Instruct",
+    // 注意：调试时，需要将待调试的python文件选为当前的文件
+    // 快捷键:
+    // F5进行调试
+    // Shift + F5可以停止调试
+    // Ctrl + F5:不调试，直接运行
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "调试当前py文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}", 
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [ ],
+            "cwd": "${fileDirname}",  // 使用当前文件所在目录作为工作目录
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"  // 添加当前工程目录
+            }
+        },
+    ]
+}

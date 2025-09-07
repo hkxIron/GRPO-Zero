@@ -3,6 +3,7 @@ import time
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
 import numpy as np
 import torch
@@ -11,6 +12,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from countdown_task import CountdownTasksDataset, reward_function
+from data_types import Episode
 from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
@@ -52,6 +54,7 @@ def evaluate(model, tokenizer, device, dtype, config):
 
 
 def main(config_path: str):
+    # 解释yaml文件
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
@@ -103,7 +106,8 @@ def main(config_path: str):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for step, batch in enumerate(train_dataloader, start=1):
-        episodes = rollout(
+        # 利用模型 + 当前batch的question生成answer
+        episodes: List[Episode] = rollout(
             model=model,
             tokenizer=tokenizer,
             batch=batch,
@@ -113,9 +117,11 @@ def main(config_path: str):
             device=device,
             dtype=dtype,
         )
+        # 只要最后完整的episode
         if config["training"]["skip_unfinished_episodes"]:
             episodes = [episode for episode in episodes if episode.is_finished]
-        results = update_policy(
+
+        policy_metrics = update_policy(
             model=model,
             optimizer=optimizer,
             episodes=episodes,
@@ -126,6 +132,7 @@ def main(config_path: str):
             dtype=dtype,
         )
         torch.cuda.synchronize()
+
         end_time = time.time()
         duration = end_time - start_time
         start_time = end_time
@@ -141,13 +148,12 @@ def main(config_path: str):
         std_reward = np.std(reward)
         success_rate = np.mean(answer_reward)
         format_reward = np.mean(formatted_reward)
-        grad_norm = results["grad_norm"]
-        entropy = results["entropy"]
+        grad_norm = policy_metrics["grad_norm"]
+        entropy = policy_metrics["entropy"]
         lr = optimizer.param_groups[0]["lr"]
-        loss = results["loss"]
-        mean_response_len = np.mean(
-            [len(episode.generated_token_ids) for episode in episodes]
-        )
+        loss = policy_metrics["loss"]
+        mean_response_len = np.mean( [len(episode.generated_token_ids) for episode in episodes])
+
         print(
             f"\rStep {step}, mean_reward: {mean_reward:.2f}, "
             f"train success_rate: {success_rate:.2f}, "
@@ -172,6 +178,7 @@ def main(config_path: str):
         tb_writer.add_scalar("learning_rate", lr, step)
         tb_writer.add_scalar("mean_response_len", mean_response_len, step)
         tb_writer.add_scalar("entropy", entropy, step)
+
         for i, episode in enumerate(episodes):
             # TensorBoard treats text as markdown.
             text = html.escape(episode.text)
@@ -188,4 +195,5 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="config.yaml")
     args = parser.parse_args()
+    print(f"{torch.__version__}")
     main(args.config)

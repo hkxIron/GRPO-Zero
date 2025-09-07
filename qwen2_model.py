@@ -7,7 +7,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+"""
+为何要重新实现一遍呢？不用transformers的呢？
 
+因为作者的目标就是： No transformers and vLLM dependencies!
+即不依赖于transformers和vLLM的依赖，所以需要重新手动实现
+"""
 @dataclass
 class Qwen2Config:
     attention_dropout: float = 0.0
@@ -308,6 +313,7 @@ class Transformer(nn.Module):
         config_file = Path(ckpt_path) / "config.json"
         with open(config_file, "r") as f:
             config = json.load(f)
+
         args = Qwen2Config(
             attention_dropout=config["attention_dropout"],
             bos_token_id=config["bos_token_id"],
@@ -320,6 +326,7 @@ class Transformer(nn.Module):
             max_window_layers=config["max_window_layers"],
             model_type=config["model_type"],
             num_hidden_layers=config["num_hidden_layers"],
+            #num_hidden_layers=1,
             num_attention_heads=config["num_attention_heads"],
             num_key_value_heads=config["num_key_value_heads"],
             vocab_size=config["vocab_size"],
