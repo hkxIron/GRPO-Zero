@@ -28,7 +28,10 @@ img1="icr"
 img2=".m"
 img3="ice.cn"
 #img4='hkx/llm:1.0.2'
-img4='wsw/large-lm:1.0.15-3'
+# hkx/llm:2.0.0 # nvidia-cuda12.4-python3.11-torch2.6.0-transformers-trl:1.0-multistage-v19
+#img4='wsw/large-lm:1.0.15-3'
+#img4='wsw/large-lm:1.0.15-2_6'  # torch=2.6
+img4='hkx/llm:2.6.0' # torch=2.6
 image="m${img1}.cloud${img2}ioff${img3}/${img4}"
 echo $image
 
@@ -74,10 +77,14 @@ nohup docker run -i --rm --gpus '"device='${device_list}'"'  --name test_grpo --
     bash -c "\
 export PYTHONPATH=/docker_workspace && \
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64 && \
-torchrun --nproc_per_node=${gpu_num} --rdzv-endpoint=127.0.0.1:${port} \
-train.py --config config_24GB_gpu_docker.yaml \
+. /opt/conda/etc/profile.d/conda.sh && \
+conda activate py_3_10 && \
+python train.py --config config_24GB_gpu_docker.yaml \
  " 2>&1 |tee logs/log_${time_str}.txt
 
 set +x
 echo "`date` 训练结束"
 
+
+# torchrun --nproc_per_node=${gpu_num} --rdzv-endpoint=127.0.0.1:${port} \
+# train.py --config config_24GB_gpu_docker.yaml \

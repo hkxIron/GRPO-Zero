@@ -195,5 +195,5 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="config.yaml")
     args = parser.parse_args()
-    print(f"{torch.__version__}")
+    print(f"{torch.__version__=}")
     main(args.config)
