@@ -4,8 +4,25 @@ from typing import Dict, List
 
 from jinja2 import Environment
 from tokenizers import Encoding
+# 依赖于tokenizer包
 from tokenizers import Tokenizer as TokenizerBase
 
+"""
+Tokenizers
+Provides an implementation of today's most used tokenizers, with a focus on performance and versatility.
+
+Bindings over the Rust implementation. If you are interested in the High-level design, you can go check it there.
+
+Otherwise, let's dive in!
+
+Main features:
+Train new vocabularies and tokenize using 4 pre-made tokenizers (Bert WordPiece and the 3 most common BPE versions).
+Extremely fast (both training and tokenization), thanks to the Rust implementation. Takes less than 20 seconds to tokenize a GB of text on a server's CPU.
+Easy to use, but also extremely versatile.
+Designed for research and production.
+Normalization comes with alignments tracking. It's always possible to get the part of the original sentence that corresponds to a given token.
+Does all the pre-processing: Truncate, Pad, add the special tokens your model needs.
+"""
 
 class Tokenizer:
     """Tokenizer with chat template supported using jinja2 engine"""
