@@ -38,6 +38,7 @@ class Qwen2Config:
     use_cache: bool = True
     use_sliding_window: bool = False
     vocab_size: int = 151936
+    use_gradient_checkpointing: bool = True # 是否启用梯度检查, 以减小activation的占用内存,  但会增加计算量
 
 
 class RMSNorm(torch.nn.Module):
@@ -375,6 +376,7 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.num_hidden_layers
+        self.use_gradient_checkpointing = params.use_gradient_checkpointing
 
         self.embed_tokens = torch.nn.Embedding(params.vocab_size, params.hidden_size)
         with torch.device(device):
@@ -400,18 +402,22 @@ class Transformer(nn.Module):
         pos = torch.arange(0, seqlen, device=token_ids.device, dtype=torch.int32)
         pos_emb = self.rotary_emb(h, pos[None, :])
 
-        # pipe = []
-        # for layer in self.layers:
-        #     pipe.append(lambda x, layer=layer: layer(x, pos_emb))
-        # pipe.append(self.norm.forward)
-        # pipe.append(self.output_proj)
-        # return torch.utils.checkpoint.checkpoint_sequential(pipe, len(pipe), h, use_reentrant=False)
-
-        x = h
-        for layer in self.layers:
-            x = layer(x, pos_emb)
-        output = self.lm_head_proj(self.norm(x))
-        return output
+        if self.use_gradient_checkpointing:
+            pipe_funcs = []
+            for layer in self.layers:
+                pipe_funcs.append(lambda x, layer=layer: layer(x, pos_emb))
+            pipe_funcs.append(self.norm.forward)
+            pipe_funcs.append(self.output_proj)
+            return torch.utils.checkpoint.checkpoint_sequential(functions=pipe_funcs, segments=len(pipe_funcs), input=h, use_reentrant=False)
+        else:
+            # 不使用梯度检查点
+            x = h
+            for layer in self.layers:
+                x = layer(x, pos_emb)
+            # x: (batch_size, seq_len, hidden_dim)
+            # output: (batch_size, seq_len, vocab_size)
+            output = self.lm_head_proj(self.norm(x))
+            return output
 
     def inference(self, tokens: torch.Tensor, start_pos: Union[int, torch.Tensor]):
         _bsz, seqlen = tokens.shape
