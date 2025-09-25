@@ -50,6 +50,6 @@ class Tokenizer:
 
     def tokenize(self, text: str) -> Encoding:
         return self.tokenizer.encode(text)
-
+    # convert id to tokens
     def detokenize(self, token_ids: List[int]) -> str:
         return self.tokenizer.decode(token_ids, skip_special_tokens=False)

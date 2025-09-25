@@ -5,7 +5,6 @@ from typing import Dict, List
 @dataclass
 class Episode:
     """Store all relevant information of an episode."""
-
     prefix: str
     text: str
     prefix_token_ids: List[int]
@@ -19,7 +18,6 @@ class Episode:
 @dataclass
 class MiniBatch:
     """Batch of data for each training step."""
-
     prefix: List[str]
     prefix_tokens: List[List[str]]
     prefix_token_ids: List[List[int]]

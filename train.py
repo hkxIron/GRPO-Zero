@@ -45,7 +45,7 @@ def evaluate(model, tokenizer, device, dtype, config):
             batch=batch,
             max_gen_len=config["training"]["max_gen_len"] * 2,
             num_answer_per_question=1,
-            reward_function=reward_function,
+            reward_func=reward_function,
             device=device,
             dtype=dtype,
         )
@@ -82,7 +82,7 @@ def main(config_path: str):
         split="train",
         test_size=config["data"]["test_size"],
     )
-    generator = torch.Generator(device=device)
+    generator = torch.Generator(device=device) # random seed, 是一个用于控制随机数生成的类, 控制随机种子：确保随机操作的可重复性,设备管理：让随机数生成在特定设备上.
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
@@ -113,11 +113,11 @@ def main(config_path: str):
             batch=batch,
             max_gen_len=config["training"]["max_gen_len"],
             num_answer_per_question=NUM_ANSWERS_PER_QUESTION,
-            reward_function=reward_function,
+            reward_func=reward_function,
             device=device,
             dtype=dtype,
         )
-        # 只要最后完整的episode
+        # 只要最后完整的episode，而不要强制结束的episodes
         if config["training"]["skip_unfinished_episodes"]:
             episodes = [episode for episode in episodes if episode.is_finished]
 
@@ -131,7 +131,31 @@ def main(config_path: str):
             device=device,
             dtype=dtype,
         )
-        torch.cuda.synchronize()
+
+        """
+        GPU 的异步执行特性
+        问题：GPU 操作是异步的
+        import torch
+        import time
+
+        # GPU 操作是异步的
+        start = time.time()
+        x = torch.randn(10000, 10000).cuda()
+        y = torch.randn(10000, 10000).cuda()
+        z = x @ y  # 矩阵乘法（在GPU上异步执行）
+
+        print(f"代码执行时间: {time.time() - start:.4f}s")  # 时间很短
+        # 但此时GPU可能还在计算！
+        解决方案：使用 synchronize()
+        start = time.time()
+        x = torch.randn(10000, 10000).cuda()
+        y = torch.randn(10000, 10000).cuda()
+        z = x @ y
+
+        torch.cuda.synchronize()  # 等待GPU完成计算
+        print(f"实际计算时间: {time.time() - start:.4f}s")  # 反映真实计算时间
+        """
+        torch.cuda.synchronize() # torch.cuda.synchronize() 的作用是强制等待 CUDA 设备完成所有先前提交的任务。
 
         end_time = time.time()
         duration = end_time - start_time
@@ -139,9 +163,7 @@ def main(config_path: str):
 
         # compute and log important metrics
         reward = [episode.reward for episode in episodes]
-        formatted_reward = [
-            episode.reward_info["format_reward"] for episode in episodes
-        ]
+        formatted_reward = [ episode.reward_info["format_reward"] for episode in episodes ]
         answer_reward = [episode.reward_info["answer_reward"] for episode in episodes]
         num_finished_episodes = sum(episode.is_finished for episode in episodes)
         mean_reward = np.mean(reward)

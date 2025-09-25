@@ -48,12 +48,16 @@ class RMSNorm(torch.nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
+        # NOTE:并没有去中心化, 此处假定mean(x)为0
+        # x: (batch_size, seq_len, hidden_dim)
+        # x/std(x) = x / sqrt(mean(x^2)) + eps
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         input_dtype = x.dtype
         x = x.to(torch.float32)
         x = self._norm(x).type_as(x)
+        # y = alpha * x, 注意此处没有偏移beta
         x = self.weight * x.to(input_dtype)
         return x
 
@@ -61,10 +65,12 @@ class RMSNorm(torch.nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     # x: (batch_size, seq_len, n_heads, head_dim)
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    half_head_dim = x.shape[-1]//2
+    x1 = x[..., : half_head_dim]
+    x2 = x[..., half_head_dim:]
     return torch.cat((-x2, x1), dim=-1)
 
+# 对q,k分别进行旋转
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2):
     # q: (batch_size, seq_len, n_heads, head_dim)
     # k: (batch_size, seq_len, n_kv_heads, head_dim)
@@ -305,8 +311,8 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(
         self,
-        dim: int,
-        intermediate_size: int,
+        dim: int, # 2048
+        intermediate_size: int, # 2048* 5.375 = 11008  
     ):
         super().__init__()
         self.up_proj = nn.Linear(dim, intermediate_size, bias=False)
@@ -314,6 +320,9 @@ class FeedForward(nn.Module):
         self.gate_proj = nn.Linear(dim, intermediate_size, bias=False)
 
     def forward(self, x):
+        # x: (batch_size, seq_len, hidden_dim)
+        # silu = x*sigmoid(x), Sigmoid Linear Unit (SiLU)
+        # y = down_proj(silu(gate_proj(x)) * up_proj(x))
         x = self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
         return x
 
@@ -325,11 +334,9 @@ class TransformerBlock(nn.Module):
         self.dim = args.hidden_size
         self.head_dim = args.hidden_size // args.num_attention_heads
         self.self_attn = Attention(args)
-        self.mlp = FeedForward(
-            dim=args.hidden_size,
-            intermediate_size=args.intermediate_size,
-        )
+        self.mlp = FeedForward(dim=args.hidden_size, intermediate_size=args.intermediate_size,)
         self.layer_id = layer_id
+        # 注意：名字不要修改，否则与pretrained模型文件中的名字不一致，导致无法加载模型
         self.input_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
@@ -339,18 +346,20 @@ class TransformerBlock(nn.Module):
         pos_embed: Tuple[torch.Tensor, torch.Tensor],
         start_pos: Optional[Union[int, torch.Tensor]] = None,
     ):
+        # prev rms norm
+        # x: (batch_size, seq_len, hidden_dim)
         h = x + self.self_attn(self.input_layernorm(x), pos_embed, start_pos=start_pos)
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
-
 
 class Qwen2RotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2Config, device: torch.device):
         super().__init__()
         self.config = config
-        base = config.rope_theta
-        dim = config.hidden_size // config.num_attention_heads
+        base = config.rope_theta # 100w
+        dim = config.hidden_size // config.num_attention_heads # head_dim=128
         with torch.autocast(device_type=device.type, dtype=torch.float32):
+            # inv_freq = base^(-2i/head_dim), shape: [head_dim//2]
             inv_freq = 1.0 / (
                 base
                 ** (torch.arange(0, dim, 2, dtype=torch.int64).float().to(device) / dim)
@@ -359,12 +368,22 @@ class Qwen2RotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self, x, pos):
+        # inv_freq: [head_dim//2] -> [batch_size, head_dim//2, 1]
         inv_freq = self.inv_freq[None, :, None].float().expand(pos.shape[0], -1, 1)
-        pos = pos[:, None, :].float()
+        # pos: [batch_size=1, seq_len]
+        # => [batch_size=1, 1, seq_len]
+        pos = pos[:, None, :].float() # 中间插入一维
         device_type = x.device.type
         with torch.autocast(device_type=device_type, enabled=False):
+            # x: (batch_size, seq_len, hidden_dim)
+            # inv_freq: [batch_size, head_dim//2, 1]
+            # pos: [batch_size=1, 1, seq_len] 
+            # freqs: [batch_size, head_dim//2, seq_len]
+            #  transpose => [batch_size, seq_len, head_dim//2]
             freqs = (inv_freq.float().to(x.device) @ pos.float()).transpose(1, 2)
+            # emb: [batch_size, seq_len, head_dim]
             emb = torch.cat((freqs, freqs), dim=-1)
+            # sin/cos: [batch_size, seq_len, head_dim]
             cos = emb.cos()
             sin = emb.sin()
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
@@ -399,46 +418,56 @@ class Transformer(nn.Module):
     def forward(self, token_ids: torch.Tensor):
         _bsz, seqlen = token_ids.shape
         h = self.embed_tokens(token_ids)
+        # pos: [seq_len]
         pos = torch.arange(0, seqlen, device=token_ids.device, dtype=torch.int32)
+        # h: (batch_size, seq_len, hidden_dim)
+        # pos: [seq_len] -> [batch_size, seq_len]
+        # pos_emb: (batch_size, seq_len, hidden_dim)
         pos_emb = self.rotary_emb(h, pos[None, :])
 
         if self.use_gradient_checkpointing:
             pipe_funcs = []
-            for layer in self.layers:
-                pipe_funcs.append(lambda x, layer=layer: layer(x, pos_emb))
+            for current_layer in self.layers:
+                pipe_funcs.append(lambda x, layer=current_layer:  # layer的值固定为current_layer
+                                            layer(x, pos_emb))
             pipe_funcs.append(self.norm.forward)
-            pipe_funcs.append(self.output_proj)
+            pipe_funcs.append(self.lm_head_proj)
             return torch.utils.checkpoint.checkpoint_sequential(functions=pipe_funcs, segments=len(pipe_funcs), input=h, use_reentrant=False)
         else:
             # 不使用梯度检查点
             x = h
-            for layer in self.layers:
-                x = layer(x, pos_emb)
+            for current_layer in self.layers:
+                x = current_layer(x, pos_emb)
             # x: (batch_size, seq_len, hidden_dim)
             # output: (batch_size, seq_len, vocab_size)
             output = self.lm_head_proj(self.norm(x))
             return output
 
     def inference(self, tokens: torch.Tensor, start_pos: Union[int, torch.Tensor]):
-        _bsz, seqlen = tokens.shape
-        del _bsz
+        batch_size, seqlen = tokens.shape
+        del batch_size
         h = self.embed_tokens(tokens)
-
+        # pos:[batch_size=1, seq_len]
         pos = torch.arange(0, seqlen, device=tokens.device, dtype=torch.int32)[None, :]
         if isinstance(start_pos, torch.Tensor):
             pos = pos + start_pos[:, None]
         else:  # int
             pos.add_(start_pos)
-        pos_emb = self.rotary_emb(h, pos)
+        # h: (batch_size, seq_len, hidden_dim)
+        # pos_emb: Tuple((batch_size, seq_len, hidden_dim), (batch_size, seq_len, hidden_dim)), 内含cos, sin
+        pos_emb = self.rotary_emb.forward(h, pos)
 
         for layer in self.layers:
             h = layer(h, pos_emb, start_pos=start_pos)
 
         # only need the hidden state of the last token
         # to predict the next token
+        # h: (batch_size, seq_len, hidden_dim), 只取最后一个token的hidden state
+        # => h:[batch_size, seq_len=1, dim]
         h = h[:, -1:, :]
         h = self.norm(h)
 
+        # output: [batch_size, seq_len=1, vocab_size]
         output = self.lm_head_proj(h)
         return output
 
@@ -449,10 +478,9 @@ class Transformer(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ):
+        # 分别初始化各层的kv cache
         for layer in self.layers:
-            layer.self_attn.init_kv_cache(
-                max_batch_size, max_seq_len, dtype=dtype, device=device
-            )
+            layer.self_attn.init_kv_cache(max_batch_size, max_seq_len, dtype=dtype, device=device)
 
     def del_kv_cache(self):
         for layer in self.layers:
@@ -476,7 +504,6 @@ class Transformer(nn.Module):
             max_window_layers=config["max_window_layers"],
             model_type=config["model_type"],
             num_hidden_layers=config["num_hidden_layers"],
-            #num_hidden_layers=1,
             num_attention_heads=config["num_attention_heads"],
             num_key_value_heads=config["num_key_value_heads"],
             vocab_size=config["vocab_size"],
@@ -494,24 +521,28 @@ class Transformer(nn.Module):
         import safetensors.torch
 
         model_weight_files = sorted(Path(ckpt_path).glob("model*.safetensors"))
-        weights = {}
+        param_name_to_weights = {}
         for file in model_weight_files:
-            weights.update(safetensors.torch.load_file(file, device="cpu"))
+            param_name_to_weights.update(safetensors.torch.load_file(file, device="cpu"))
         # remove "model." prefix from keys
-        weights = {k.replace("model.", ""): v for k, v in weights.items()}
-        model.load_state_dict(weights, strict=True, assign=True)
+        param_name_to_weights = {k.replace("model.", ""): v for k, v in param_name_to_weights.items()}
+        print("model weight:")
+        param_name_to_weight_shape = {key: value.shape for key, value in param_name_to_weights.items()}
+        print(json.dumps(param_name_to_weight_shape, indent=1))
+        # NOTE:类中所有的变理名必须和safetensors中的参数名一致
+        model.load_state_dict(param_name_to_weights, strict=True, assign=True)
         return model.to(device)
 
-
-if __name__ == "__main__":
+def test_transformer():
     conf = Qwen2Config()
     conf.num_hidden_layers=2
     conf.vocab_size=100
     conf.hidden_size=32
+    conf.use_gradient_checkpointing=False
 
+    device = torch.device("cpu")
     batch_size= 2
     seq_len = 16
-    device = torch.device("cpu")
     model =Transformer(params=conf, device=device)
     model.eval()
     model.init_kv_cache(batch_size, 512, device, torch.float32)
@@ -521,3 +552,28 @@ if __name__ == "__main__":
     result = model.forward(token_ids=token_ids)
     print(result.shape)
     print(f'results:{result}')
+
+    # 模拟测试：验证每个lambda确实捕获了不同的层
+    layers = ['layer1', 'layer2', 'layer3']
+    functions = []
+
+    for current_layer in layers:
+        # 将两个参数的lambda变成只有一个参数的lambda
+        #functions.append(lambda x, layer_obj=current_layer: f"{layer_obj} processed {x}")
+        functions.append(lambda x, layer_obj=current_layer:  # layer_obj的值为current_layer
+                            f"{layer_obj} processed {x}")
+
+    # 测试每个函数
+    for i, func in enumerate(functions):
+        print(func("input"))  # 应该输出：layerX processed input
+
+def test_load_qwen_2dot5_model():
+    device = torch.device("cpu")
+    pretrained_model_path = "/home/hkx/data/work/hf_data_and_model/models/Qwen/Qwen2.5-0.5B-Instruct/"
+    model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
+    print(model)
+
+
+if __name__ == "__main__":
+    test_load_qwen_2dot5_model()
+    #test_transformer()
