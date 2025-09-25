@@ -311,6 +311,28 @@ def cleanup_old_checkpoints(ckpt_dir, keep_last_n=5):
 
 -------------------------------------
 查看 state_dict()
+class ComplexModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3)  # 卷积层
+        self.bn1 = nn.BatchNorm2d(16)                 # 批归一化层
+        self.fc = nn.Linear(16 * 26 * 26, 10)         # 全连接层
+        self.register_buffer('running_mean', torch.zeros(1))  # 注册缓冲区
+        
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+model = ComplexModel()
+state_dict = model.state_dict()
+
+print("复杂模型的 state_dict:")
+for key, value in state_dict.items():
+    print(f"{key}: shape {value.shape}")
+
 python
 state_dict = model.state_dict()
 print("State dict keys:")
