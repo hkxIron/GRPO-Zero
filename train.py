@@ -93,7 +93,7 @@ def main(config_path: str):
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
-    optimizer = MemoryEfficientAdamW(
+    optimizer: MemoryEfficientAdamW = MemoryEfficientAdamW(
         model.parameters(),
         lr=config["training"]["learning_rate"],
         weight_decay=config["training"]["weight_decay"],
@@ -203,13 +203,14 @@ def main(config_path: str):
 
         for i, episode in enumerate(episodes):
             # TensorBoard treats text as markdown.
-            text = html.escape(episode.text)
+            text = html.escape(episode.text) # html.escape() 函数将字符串中的特殊字符转换为 HTML 实体，以防止 XSS 攻击。
             tb_writer.add_text(f"text_{i}", f"<pre>{text}</pre>", step)
 
         # save checkpoint
         if step % config["training"]["ckpt_save_interval"] == 0:
             output_file = ckpt_dir / f"ckpt_{step:06d}.pt"
-            torch.save(model.state_dict(), output_file)
+            # 没有保存 optimizer 的状态。当前代码只保存了模型的参数权重
+            torch.save(model.state_dict(), output_file) # 保存state_dict()
             print(f"Saved checkpoint to {output_file}")
 
 
@@ -219,3 +220,117 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"{torch.__version__=}")
     main(args.config)
+
+
+"""
+# 完整的检查点应该包含这些内容
+checkpoint = {
+    'step': step,                          # 当前训练步数
+    'model_state_dict': model.state_dict(), # 模型参数
+    'optimizer_state_dict': optimizer.state_dict(),  # 优化器状态
+    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,  # 学习率调度器
+    'loss': current_loss,                  # 当前损失
+    'config': config,                      # 训练配置
+    'timestamp': datetime.now().isoformat() # 时间戳
+}
+
+torch.save(checkpoint, output_file)
+
+修复后的完整保存代码
+python
+# save checkpoint
+if step % config["training"]["ckpt_save_interval"] == 0:
+    output_file = ckpt_dir / f"ckpt_{step:06d}.pt"
+    
+    # 创建完整的检查点
+    checkpoint = {
+        'step': step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'config': config,
+        'loss': current_loss  # 如果有当前损失值的话
+    }
+    
+    # 如果有学习率调度器，也保存其状态
+    if 'scheduler' in locals() or 'scheduler' in globals():
+        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+    
+    torch.save(checkpoint, output_file)
+    print(f"Saved checkpoint to {output_file}")
+
+对应的加载代码
+python
+def load_checkpoint(model, optimizer, checkpoint_path, device='cuda'):
+    # 加载完整的检查点
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # 加载模型参数
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # 加载优化器状态
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # 加载学习率调度器状态（如果存在）
+    if 'scheduler_state_dict' in checkpoint and scheduler is not None:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    # 恢复训练步数
+    start_step = checkpoint['step'] + 1  # 从下一步开始
+    
+    print(f"Loaded checkpoint from step {checkpoint['step']}")
+    return start_step
+
+# 使用示例
+start_step = load_checkpoint(model, optimizer, "ckpt_010000.pt")
+
+1. 同时保存最新和最佳检查点
+python
+# 保存最新检查点
+latest_checkpoint = {
+    'step': step,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'loss': current_loss,
+    'config': config
+}
+torch.save(latest_checkpoint, "latest.pt")
+
+# 如果是最佳表现，额外保存
+if current_loss < best_loss:
+    best_loss = current_loss
+    torch.save(latest_checkpoint, "best.pt")
+
+2. 定期清理旧检查点
+python
+def cleanup_old_checkpoints(ckpt_dir, keep_last_n=5):
+    #保留最近5个检查点，删除旧的
+    checkpoints = sorted(ckpt_dir.glob("ckpt_*.pt"))
+    if len(checkpoints) > keep_last_n:
+        for old_ckpt in checkpoints[:-keep_last_n]:
+            old_ckpt.unlink()
+
+-------------------------------------
+查看 state_dict()
+python
+state_dict = model.state_dict()
+print("State dict keys:")
+for key in state_dict.keys():
+    print(f"  {key}")
+
+print("\nState dict 内容:")
+for key, value in state_dict.items():
+    print(f"{key}: shape {value.shape}, dtype {value.dtype}")
+输出结果：
+
+State dict keys:
+  linear1.weight
+  linear1.bias
+  linear2.weight
+  linear2.bias
+
+State dict 内容:
+linear1.weight: shape torch.Size([5, 10]), dtype torch.float32
+linear1.bias: shape torch.Size([5]), dtype torch.float32
+linear2.weight: shape torch.Size([2, 5]), dtype torch.float32
+linear2.bias: shape torch.Size([2]), dtype torch.float32
+"""
