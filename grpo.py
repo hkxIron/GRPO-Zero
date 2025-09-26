@@ -318,7 +318,7 @@ def update_policy(
     # episodes: [batch_size*num_answer_per_question], 所有episode的loss一起更新
     # NOTE: 注意：这里移除了deepseek grpo中的refrence model以及 kl penalty
     # update the policy
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm) # 这里的 grad_norm 是裁剪前的原始梯度范数，而不是裁剪后的值。
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
     return {
@@ -326,3 +326,34 @@ def update_policy(
         "grad_norm": grad_norm.item(),
         "entropy": entropy.item(),
     }
+
+"""
+梯度裁剪的工作原理
+torch.nn.utils.clip_grad_norm_() 的工作逻辑是：
+
+python
+def clip_grad_norm_(parameters, max_norm):
+    # 1. 计算所有参数的梯度范数（总梯度大小）
+    total_norm = compute_gradient_norm(parameters)
+    
+    # 2. 如果梯度范数超过最大值，按比例缩放
+    if total_norm > max_norm:
+        clip_coef = max_norm / (total_norm + 1e-6)
+        for param in parameters:
+            if param.grad is not None:
+                param.grad.mul_(clip_coef)  # 按比例缩放梯度
+    
+    # 3. 返回裁剪前的原始梯度范数, 而不裁剪后的
+    return total_norm
+
+监控目的
+    返回原始梯度范数可以让你了解：
+    梯度爆炸的程度
+    训练稳定性
+    是否需要调整学习率或模型结构
+    
+监控指标解读：
+    如果 grad_norm 经常远大于 max_grad_norm：梯度爆炸，可能需要更小的学习率
+    如果 grad_norm 经常远小于 max_grad_norm：梯度较小，可能收敛或需要检查模型
+    如果 grad_norm 在 max_grad_norm 附近波动：梯度裁剪正常工作
+"""

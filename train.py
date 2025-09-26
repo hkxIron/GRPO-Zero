@@ -158,7 +158,7 @@ def main(config_path: str):
         torch.cuda.synchronize() # torch.cuda.synchronize() 的作用是强制等待 CUDA 设备完成所有先前提交的任务。
 
         end_time = time.time()
-        duration = end_time - start_time
+        duration = end_time - start_time # 每次一个batch的rollout+train的时间
         start_time = end_time
 
         # compute and log important metrics
@@ -191,7 +191,7 @@ def main(config_path: str):
 
         tb_writer.add_scalar("loss", loss, step)
         tb_writer.add_scalar("mean_reward", mean_reward, step)
-        tb_writer.add_scalar("std_reward", std_reward, step)
+        tb_writer.add_scalar("std_reward", std_reward, step) # reward的标准差, 监测方差，有助于了解reward的分散程度
         tb_writer.add_scalar("success_rate/train", success_rate, step)
         tb_writer.add_scalar("format_reward", format_reward, step)
         tb_writer.add_scalar("grad_norm", grad_norm, step)
@@ -199,11 +199,16 @@ def main(config_path: str):
         tb_writer.add_scalar("num_finished_episodes", num_finished_episodes, step)
         tb_writer.add_scalar("learning_rate", lr, step)
         tb_writer.add_scalar("mean_response_len", mean_response_len, step)
-        tb_writer.add_scalar("entropy", entropy, step)
+        tb_writer.add_scalar("entropy", entropy, step) # 模型输出的熵度，有助于了解模型的不确定性， 一般模型越来越置信
 
+        # episodes: [batch_size*num_answer_per_question]
         for i, episode in enumerate(episodes):
             # TensorBoard treats text as markdown.
             text = html.escape(episode.text) # html.escape() 函数将字符串中的特殊字符转换为 HTML 实体，以防止 XSS 攻击。
+            # 以question_index进行聚合更好，在tensorboard中更宜于查看, 可以看到该问题在每个iter中生成的内容
+            """
+            我们通过文本形式展示的文本发现，grpo如果前面没有sft, 即使经过2000多次迭代，其think内容也没有任何有效思考内容，所以需要保证grpo前有sft
+            """
             tb_writer.add_text(f"text_{i}", f"<pre>{text}</pre>", step)
 
         # save checkpoint
