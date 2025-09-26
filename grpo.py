@@ -235,6 +235,7 @@ def update_policy(
     dtype: torch.dtype,
 ):
     """Update the policy using the GRPO algorithm."""
+    # episodes: [batch_size*num_answer_per_question]
     episodes = normalize_rewards_per_group(episodes)
     # sort episodes by token length for efficient (micro-)batching, 以减小seq_len不同导致的padding太多
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
@@ -299,19 +300,22 @@ def update_policy(
             # token_entropy: [micro_batch_size, batch_max_length-1]
             token_entropy = compute_entropy(logits)
             # target_masks; [micro_batch_size, batch_max_length-1]
-            # 只计算有效token的entropy，排除了padding的entropy
+            # NOTE:entropy只是观察，但并没有被用于计算loss      
+            # 只计算有效token的entropy，排除了padding的entropy, 
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
+        # NOTE: 使用mlm loss * advantage reward, 使得-loss乘以reward, 之前ppo里的 importance sampling已经没有了, GAE也已经没有了!!!
         # negative_log_probs: [micro_batch_size, batch_max_length-1]
         # batch_advantages: [micro_batch_size]
         # obj: [micro_batch_size, batch_max_length-1]
-        obj = negative_log_probs * batch_advantages[:, None]
+        obj = negative_log_probs * batch_advantages[:, None] 
         # per-token objective
         # target_masks; [micro_batch_size, batch_max_length-1]
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
-        loss.backward()
+        loss.backward() # 梯度累加，但不更新参数
 
+    # episodes: [batch_size*num_answer_per_question], 所有episode的loss一起更新
     # NOTE: 注意：这里移除了deepseek grpo中的refrence model以及 kl penalty
     # update the policy
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
