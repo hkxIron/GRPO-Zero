@@ -212,11 +212,11 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     prob = softmax(logit) = exp(logit)/sum(exp(logit))
 
     推导entropy公式：
-    entropy = -sum_{i} {p_i*log(p_i)} = -sum_{i} { p_i * log[ exp(logit_i)/sum(exp(logit)) ]}
-    = - sum_{i} { p_i * logit_i - p_i * log(sum(exp(logit)))}
-    = log(sum(exp(logit))) - sum_{i} { p_i * logit_i }  
+    entropy = -sum_{i} {p_i*log(p_i)} = -sum_{i} { p_i * log[ exp(logit_i)/sum(exp(logit_j)) ]}
+    = - sum_{i} { p_i * logit_i - p_i * log(sum(exp(logit_j)))}
+    = log(sum(exp(logit_j))) - sum_{i} { p_i * logit_i }  
      
-    entropy = logsumexp - sum_{i} {p_i*log(p_i)} 
+    entropy = logsumexp(logit_j) - sum_{i} {p_i*log(p_i)} 
     NOTE: 这样变换的好处是，logsumexp是稳定的，而sum(p_i*log(p_i))可能不稳定，因为log(p_i)可能很小，导致乘以p_i后变成0，而logsumexp不会。
     """
     # entropy: [batch_size, seq_len]
@@ -243,26 +243,26 @@ def update_policy(
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
     entropy = 0.0
 
-    for i in range(0, len(episodes), step=micro_batch_size):
+    for batch_start_idx in range(0, len(episodes), step=micro_batch_size):
         print(
-            f"\r* Computing policy gradient: {i:>2d}/{len(episodes):>2d}", # 右对齐,最小宽度为2个字符, 十进制整数
+            f"\r* Computing policy gradient: {batch_start_idx:>2d}/{len(episodes):>2d}", # 右对齐,最小宽度为2个字符, 十进制整数
             flush=True,
             end="",
         )
-        j = min(i + micro_batch_size, len(episodes))
+        batch_end_idx = min(batch_start_idx + micro_batch_size, len(episodes))
         # 取一部分episode
-        batch_episodes = episodes[i:j]
+        batch_episodes = episodes[batch_start_idx:batch_end_idx]
         batch_lengths = [
             len(episode.prefix_token_ids) + len(episode.generated_token_ids)
             for episode in batch_episodes
         ]
         batch_max_length = max(batch_lengths)
-        batch_token_ids = [
+        batch_token_ids: List[List[int]] = [
             episode.prefix_token_ids + episode.generated_token_ids + [pad_token_id] * (batch_max_length - batch_lengths[i])
             for i, episode in enumerate(batch_episodes)
         ]
         # batch_mask; [micro_batch_size, batch_max_length]
-        batch_masks = [
+        batch_masks: List[List[int]] = [
             [0] * len(episode.prefix_token_ids) # prefix不需要计算loss
             + [1] * len(episode.generated_token_ids) # 生成部分要计算loss
             + [0] * (batch_max_length - batch_lengths[i]) # padding的地方不计算loss
@@ -308,7 +308,7 @@ def update_policy(
         # negative_log_probs: [micro_batch_size, batch_max_length-1]
         # batch_advantages: [micro_batch_size]
         # obj: [micro_batch_size, batch_max_length-1]
-        obj = negative_log_probs * batch_advantages[:, None] 
+        obj = negative_log_probs * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
         # per-token objective
         # target_masks; [micro_batch_size, batch_max_length-1]
         obj = (obj * target_masks).sum() / num_target_tokens
