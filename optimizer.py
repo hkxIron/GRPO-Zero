@@ -205,6 +205,7 @@ class MemoryEfficientAdamW(AdamW):
                 state["step"] += 1
                 state_steps.append(state["step"])
 
+            # NOTE:计算好优化器状态后,原地更新训练参数p的值
             # Process all parameters in the group
             self._memory_efficient_update(
                 params_with_grad,
@@ -277,6 +278,7 @@ class MemoryEfficientAdamW(AdamW):
                 param.mul_(1 - lr * weight_decay) # param = param * (1 - lr * weight_decay)
 
             # Update parameters (directly on GPU), NOTE:均为原地操作，原因是原地操作可以节省内存，不需要再分配GPU内存
+            # NOTE:最重要的操作，原地更新参数p的值
             param.addcdiv_(exp_avg, denom, value=-step_size) # param = param - step_size * m1 / denom = param - step_size * m1 / (v1^0.5 + eps)
 
             # Store optimizer states back to CPU
