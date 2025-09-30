@@ -172,6 +172,7 @@ class MemoryEfficientAdamW(AdamW):
             state_steps = []
             beta1, beta2 = group["betas"]
 
+            # 每个p都会有自己的state
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -184,7 +185,7 @@ class MemoryEfficientAdamW(AdamW):
                 if len(state) == 0:
                     state["step"] = 0
                     # Store optimizer states on CPU with pinned memory
-                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备上存优化器
+                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备上存优化器, 但是会pin_memory,即锁页内存
                     pin_memory = self.pin_memory
                     # 32位存储优化器状态
                     dtype = torch.float32
