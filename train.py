@@ -94,7 +94,7 @@ def main(config_path: str):
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
     optimizer: MemoryEfficientAdamW = MemoryEfficientAdamW(
-        model.parameters(),
+        params=model.parameters(),
         lr=config["training"]["learning_rate"],
         weight_decay=config["training"]["weight_decay"],
         betas=config["training"]["betas"],
@@ -176,14 +176,12 @@ def main(config_path: str):
         loss = policy_metrics["loss"]
         mean_response_len = np.mean( [len(episode.generated_token_ids) for episode in episodes])
 
-        print(
-            f"\rStep {step}, mean_reward: {mean_reward:.2f}, "
+        print(f"\rStep {step}, mean_reward: {mean_reward:.2f}, "
             f"train success_rate: {success_rate:.2f}, "
             f"grad_norm: {grad_norm:.2f}, duration: {duration:.2f}, "
             f"num_finished_episodes: {num_finished_episodes}, "
             f"mean_response_len: {mean_response_len:.2f}, "
-            f"entropy: {entropy:.2f}"
-        )
+            f"entropy: {entropy:.2f}")
         if step % config["training"]["eval_interval"] == 0:
             eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
             print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)
