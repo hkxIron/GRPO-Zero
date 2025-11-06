@@ -195,7 +195,7 @@ def answer_reward_function(
     return 0.0
 
 
-def reward_function(
+def countdown_task_reward_function(
     response: str,
     numbers: List[int] = None,
     target: int = None,
@@ -208,7 +208,7 @@ def reward_function(
     format_reward = format_reward_function("<think>" + response, end_token)
     answer_reward = answer_reward_function(response, numbers, target)
     return {
-        "reward": format_reward * 0.1 + answer_reward,
+        "reward": format_reward * 0.1 + answer_reward, # scalar
         "reward_info": {
             "format_reward": format_reward,
             "answer_reward": answer_reward,

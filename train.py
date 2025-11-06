@@ -11,9 +11,9 @@ import yaml
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from countdown_task import CountdownTasksDataset, reward_function
+from countdown_task import CountdownTasksDataset, countdown_task_reward_function
 from data_types import Episode
-from grpo import rollout, update_policy
+from grpo import policy_rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
 from tokenizer import Tokenizer
@@ -39,13 +39,13 @@ def evaluate(model, tokenizer, device, dtype, config):
     )
     success = []
     for batch in dataloader:
-        episodes = rollout(
+        episodes = policy_rollout(
             model=model,
             tokenizer=tokenizer,
             batch=batch,
             max_gen_len=config["training"]["max_gen_len"] * 2,
             num_answer_per_question=1,
-            reward_func=reward_function,
+            reward_func=countdown_task_reward_function,
             device=device,
             dtype=dtype,
         )
@@ -107,13 +107,13 @@ def main(config_path: str):
 
     for step, batch in enumerate(train_dataloader, start=1):
         # 利用模型 + 当前batch的question生成answer
-        episodes: List[Episode] = rollout(
+        episodes: List[Episode] = policy_rollout(
             model=model,
             tokenizer=tokenizer,
             batch=batch,
             max_gen_len=config["training"]["max_gen_len"],
             num_answer_per_question=NUM_ANSWERS_PER_QUESTION,
-            reward_func=reward_function,
+            reward_func=countdown_task_reward_function,
             device=device,
             dtype=dtype,
         )

@@ -2,7 +2,7 @@ import dataclasses
 import gc
 import math
 from collections import defaultdict
-from typing import Callable, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ from tokenizer import Tokenizer
 
 
 @torch.no_grad()
-def rollout(
+def policy_rollout(
     model: Transformer,
     batch: MiniBatch,
     tokenizer: Tokenizer,
@@ -113,13 +113,13 @@ def rollout(
                 generated_token_ids = generated_token_ids[: generated_token_ids.index(pad_token_id)]
             generated_text: str = tokenizer.detokenize(generated_token_ids)
             # 计算当前question的reward
-            rewards = reward_func(
+            rewards:Dict[str, Any]= reward_func(
                 response=generated_text,
                 numbers=batch.numbers[question_idx],
                 target=batch.target[question_idx],
                 end_token=end_token,
             )
-            # 每个answer都会生成一个episode, 而
+            # 每个answer都会生成一个episode
             episode = Episode(
                 prefix=batch.prefix[question_idx],
                 text=batch.prefix[question_idx] + generated_text,
@@ -252,22 +252,24 @@ def update_policy(
         batch_end_idx = min(batch_start_idx + micro_batch_size, len(episodes))
         # 取一部分episode
         batch_episodes = episodes[batch_start_idx:batch_end_idx]
-        batch_lengths = [
-            len(episode.prefix_token_ids) + len(episode.generated_token_ids)
+        # batch_lengths: [micro_batch_size] 
+        batch_lengths = [len(episode.prefix_token_ids) + len(episode.generated_token_ids)
             for episode in batch_episodes
         ]
         batch_max_length = max(batch_lengths)
+        # batch_token_ids: [micro_batch_size, batch_max_length], 即每条样本包含 prefix+generated_token_ids+right padding
         batch_token_ids: List[List[int]] = [
             episode.prefix_token_ids + episode.generated_token_ids + [pad_token_id] * (batch_max_length - batch_lengths[i])
             for i, episode in enumerate(batch_episodes)
         ]
-        # batch_mask; [micro_batch_size, batch_max_length]
+        # batch_mask; [micro_batch_size, batch_max_length
         batch_masks: List[List[int]] = [
             [0] * len(episode.prefix_token_ids) # prefix不需要计算loss
             + [1] * len(episode.generated_token_ids) # 生成部分要计算loss
             + [0] * (batch_max_length - batch_lengths[i]) # padding的地方不计算loss
-            for i, episode in enumerate(batch_episodes)
+                for i, episode in enumerate(batch_episodes)
         ]
+        # NOTE: 此处的reward只有最后一个token的reward, 其他token的reward都是0
         # batch_advantages: [micro_batch_size]
         batch_advantages = [episode.reward for episode in batch_episodes]
         # batch_token_ids: [micro_batch_size, batch_max_length]
@@ -277,6 +279,7 @@ def update_policy(
         # batch_advantages: [micro_batch_size]
         batch_advantages = torch.tensor(batch_advantages, device=device, dtype=torch.float32)
 
+        # NOTE: 将采样的trajectory在新的model中进行forward, 得到logits, 然后计算LM loss
         with torch.autocast(device_type=device.type, dtype=dtype):
             input_token_ids = batch_token_ids[:, :-1]
             target_token_ids = batch_token_ids[:, 1:] # label右移1位
@@ -287,8 +290,8 @@ def update_policy(
 
         # logits: [micro_batch_size, batch_max_length-1, vocab_size]
         # target: [micro_batch_size, batch_max_length-1]
-        # negative_log_probs: [micro_batch_size, batch_max_length-1]
-        negative_log_probs = -torch.nn.functional.cross_entropy(
+        # language_model_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
+        language_model_cross_entropy_loss = torch.nn.functional.cross_entropy(
             input=logits.reshape(-1, logits.size(-1)),
             target=target_token_ids.reshape(-1),
             ignore_index=pad_token_id,
@@ -300,19 +303,21 @@ def update_policy(
             # token_entropy: [micro_batch_size, batch_max_length-1]
             token_entropy = compute_entropy(logits)
             # target_masks; [micro_batch_size, batch_max_length-1]
-            # NOTE:entropy只是观察，但并没有被用于计算loss      
+            # NOTE: entropy只是观察，但并没有被用于计算loss, 熵越小，代表模型对输出的概率越置信
             # 只计算有效token的entropy，排除了padding的entropy, 
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
-        # NOTE: 使用mlm loss * advantage reward, 使得-loss乘以reward, 之前ppo里的 importance sampling已经没有了, GAE也已经没有了!!!
+        # NOTE: 使用lm loss * advantage reward, 使得-loss乘以reward, 之前ppo里的 importance sampling已经没有了, GAE也已经没有了!!!
+        # 没有了重要性采样, 但正规的ppo是使用的是 importance sampling = log(new_prob/old_prob)
+        # 而此处用的是 = cross_entropy_loss = log_probs
+        # 
         # negative_log_probs: [micro_batch_size, batch_max_length-1]
         # batch_advantages: [micro_batch_size]
         # obj: [micro_batch_size, batch_max_length-1]
-        obj = negative_log_probs * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
+        obj = (language_model_cross_entropy_loss) * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
         # per-token objective
         # target_masks; [micro_batch_size, batch_max_length-1]
-        obj = (obj * target_masks).sum() / num_target_tokens
-        loss = -obj
+        loss =  (obj * target_masks).sum() / num_target_tokens
         loss.backward() # 梯度累加，但不更新参数
 
     # episodes: [batch_size*num_answer_per_question], 所有episode的loss一起更新
@@ -341,7 +346,7 @@ def clip_grad_norm_(parameters, max_norm):
         clip_coef = max_norm / (total_norm + 1e-6)
         for param in parameters:
             if param.grad is not None:
-                param.grad.mul_(clip_coef)  # 按比例缩放梯度
+                param.grad.mul_(clip_coef)  # 将参数param的梯度按比例缩放梯度
     
     # 3. 返回裁剪前的原始梯度范数, 而不裁剪后的
     return total_norm
