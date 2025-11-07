@@ -288,6 +288,35 @@ def update_policy(
             # logits: [micro_batch_size, batch_max_length, vocab_size]
             logits = model.forward(input_token_ids).float()
 
+        """
+        当 $P$ 是 one-hot 编码时：
+
+        ```math
+        \begin{aligned}
+        H(P, Q) &= - \sum_{y} P(y) \log Q(y) \\
+        &= - \log Q(y_{\text{true}}) \quad \text{(因为只有一个 } P(y)=1 \text{，其他为0)}
+        \end{aligned}
+        ```
+
+        此时：
+        ```math
+        H(P, Q) = H(P) + D_{\text{KL}}(P \| Q)
+        ```
+        但由于 $P$ 是确定的（one-hot），$H(P) = 0$，所以：
+        ```math
+        H(P, Q) = D_{\text{KL}}(P \| Q)
+
+        此处使用了LM cross-entropy loss替代了重要性采样KL散度，因为它们在one-hot的情况下是等价的。
+
+
+        原始重要性采样的正向KL散度公式为：
+        ```math
+
+        D_{\text{KL}}(P \| Q) = \sum_{y} P(y) \log \frac{P(y)}{Q(y)}
+        ```
+        其中 $Q(y)$ 是采样得到的旧分布, $P(y)$ 是新模型预测的分布
+
+        """
         # logits: [micro_batch_size, batch_max_length-1, vocab_size]
         # target: [micro_batch_size, batch_max_length-1]
         # language_model_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
@@ -303,7 +332,7 @@ def update_policy(
             # token_entropy: [micro_batch_size, batch_max_length-1]
             token_entropy = compute_entropy(logits)
             # target_masks; [micro_batch_size, batch_max_length-1]
-            # NOTE: entropy只是观察，但并没有被用于计算loss, 熵越小，代表模型对输出的概率越置信
+            # NOTE: entropy只是观察，但并没有被用于计算loss, 熵越小，代表模型对输出的概率越置信,一般认为熵越大越好
             # 只计算有效token的entropy，排除了padding的entropy, 
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
