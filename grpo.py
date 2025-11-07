@@ -289,6 +289,8 @@ def update_policy(
             logits = model.forward(input_token_ids).float()
 
         """
+        此处是使用LM cross-entropy loss替代了重要性采样KL散度，因为它们在one-hot的情况下是等价的。
+
         当 $P$ 是 one-hot 编码时：
 
         ```math
@@ -309,18 +311,27 @@ def update_policy(
         此处使用了LM cross-entropy loss替代了重要性采样KL散度，因为它们在one-hot的情况下是等价的。
 
 
-        原始重要性采样的正向KL散度公式为：
+        原始重要性采样等价于负逆向KL散度：
         ```math
+        -KL(Q||P)=
 
-        D_{\text{KL}}(P \| Q) = \sum_{y} P(y) \log \frac{P(y)}{Q(y)}
-        ```
+        -D_{\text{KL}}(Q \| P) = - \sum_{y} Q(y) \log \frac{Q(y)}{P(y)}
         其中 $Q(y)$ 是采样得到的旧分布, $P(y)$ 是新模型预测的分布
+
+        H(P, Q) = H(P) + KL(P||Q)
+        H(Q, P) = H(Q) + KL(Q||P)
+
+        => 
+        -KL(Q||P)= H(Q) - H(Q, P)
+
+        H(Q)是老分布的熵，H(Q, P)是新分布和旧分布的交叉熵
+        此处忽略H(Q),因此重要性采样 = -反向KL散度 = -交叉熵loss。
 
         """
         # logits: [micro_batch_size, batch_max_length-1, vocab_size]
         # target: [micro_batch_size, batch_max_length-1]
-        # language_model_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
-        language_model_cross_entropy_loss = torch.nn.functional.cross_entropy(
+        # lm_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
+        lm_cross_entropy_loss = torch.nn.functional.cross_entropy(
             input=logits.reshape(-1, logits.size(-1)),
             target=target_token_ids.reshape(-1),
             ignore_index=pad_token_id,
@@ -340,10 +351,10 @@ def update_policy(
         # 没有了重要性采样, 但正规的ppo是使用的是 importance sampling = log(new_prob/old_prob)
         # 而此处用的是 = cross_entropy_loss = log_probs
         # 
-        # negative_log_probs: [micro_batch_size, batch_max_length-1]
+        # lm_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
         # batch_advantages: [micro_batch_size]
         # obj: [micro_batch_size, batch_max_length-1]
-        obj = (language_model_cross_entropy_loss) * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
+        obj = (-lm_cross_entropy_loss) * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
         # per-token objective
         # target_masks; [micro_batch_size, batch_max_length-1]
         loss =  (obj * target_masks).sum() / num_target_tokens
