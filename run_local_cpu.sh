@@ -1,0 +1,1 @@
+python train.py --config config_24GB_cpu.yaml 
