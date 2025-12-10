@@ -174,7 +174,7 @@ def main(config_path: str):
         entropy = policy_metrics["entropy"]
         lr = optimizer.param_groups[0]["lr"]
         loss = policy_metrics["loss"]
-        mean_response_len = np.mean( [len(episode.generated_token_ids) for episode in episodes])
+        mean_response_len = np.mean([len(episode.generated_token_ids) for episode in episodes])
 
         print(f"\rStep {step}, mean_reward: {mean_reward:.2f}, "
             f"train success_rate: {success_rate:.2f}, "
@@ -182,6 +182,7 @@ def main(config_path: str):
             f"num_finished_episodes: {num_finished_episodes}, "
             f"mean_response_len: {mean_response_len:.2f}, "
             f"entropy: {entropy:.2f}")
+
         if step % config["training"]["eval_interval"] == 0:
             eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
             print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)

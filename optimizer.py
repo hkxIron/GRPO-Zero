@@ -185,19 +185,19 @@ class MemoryEfficientAdamW(AdamW):
                 if len(state) == 0:
                     state["step"] = 0
                     # Store optimizer states on CPU with pinned memory
-                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备上存优化器, 但是会pin_memory,即锁页内存
+                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备上存优化器, 但是会pin_memory,即锁页内存加速访问
                     pin_memory = self.pin_memory
                     # 32位存储优化器状态
                     dtype = torch.float32
-
+                    # 将优化器状态存储在CPU上，以节省GPU内存
                     state["exp_avg"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
                     state["exp_avg_sq"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
                     if group["amsgrad"]:
                         state["max_exp_avg_sq"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
 
                 # Get state values
-                exp_avgs.append(state["exp_avg"]) # 一阶动量
-                exp_avg_sqs.append(state["exp_avg_sq"]) # 二阶动量
+                exp_avgs.append(state["exp_avg"]) # NOTE: 一阶动量, exp_avg存在CPU内存中
+                exp_avg_sqs.append(state["exp_avg_sq"]) # NOTE: 二阶动量, exp_avg_sq存在CPU内存中
 
                 if group["amsgrad"]:
                     max_exp_avg_sqs.append(state["max_exp_avg_sq"]) # 最大二阶动量
@@ -210,7 +210,7 @@ class MemoryEfficientAdamW(AdamW):
             self._memory_efficient_update(
                 params_with_grad,
                 grads,
-                exp_avgs,
+                exp_avgs, # NOTE: 一阶动量, exp_avg存在CPU内存中
                 exp_avg_sqs,
                 max_exp_avg_sqs,
                 state_steps,
@@ -228,8 +228,8 @@ class MemoryEfficientAdamW(AdamW):
         self,
         params,
         grads,
-        exp_avgs,
-        exp_avg_sqs,
+        exp_avgs, # NOTE: 一阶动量, exp_avg存在CPU内存中
+        exp_avg_sqs, # NOTE: 二阶动量，exp_avg_sq存在CPU内存中
         max_exp_avg_sqs,
         state_steps,
         amsgrad,
@@ -247,12 +247,14 @@ class MemoryEfficientAdamW(AdamW):
             grad = grads[i]
             param_device = param.device
 
+            # NOTE: 一阶动量, exp_avg存在CPU内存中, 需要移动到参数param所在的GPU中
             # Access optimizer states - they'll transfer efficiently due to pin_memory, 禁用换页
             exp_avg = exp_avgs[i].to(param_device, non_blocking=True) # 将优化器状态从CPU memory -> GPU memory
             exp_avg_sq = exp_avg_sqs[i].to(param_device, non_blocking=True)
 
             step = state_steps[i]
 
+            # NOTE: GPU上原地计算, 不产生中间变量
             # Decay the first and second moment running averages
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1) # m1 = m1 * beta1 + grad * (1 - beta1)
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2) # v1 = v1 * beta2 + grad^2 * (1 - beta2)
@@ -282,5 +284,5 @@ class MemoryEfficientAdamW(AdamW):
             param.addcdiv_(exp_avg, denom, value=-step_size) # param = param - step_size * m1 / denom = param - step_size * m1 / (v1^0.5 + eps)
 
             # Store optimizer states back to CPU
-            exp_avgs[i].copy_(exp_avg, non_blocking=True) # 将优化器状态exp_avgs从GPU memory -> CPU memory, 然后释放GPU memory
+            exp_avgs[i].copy_(exp_avg, non_blocking=True) # NOTE: 将优化器状态exp_avgs从GPU memory -> CPU memory, 然后释放GPU memory
             exp_avg_sqs[i].copy_(exp_avg_sq, non_blocking=True)

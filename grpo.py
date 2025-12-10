@@ -31,8 +31,8 @@ def policy_rollout(
     batch_size = len(batch.prefix) * num_answer_per_question
     min_prompt_len = min(len(t) for t in prefix_token_ids)
     max_prompt_len = max(len(t) for t in prefix_token_ids)
-    total_len = max_gen_len + max_prompt_len # 最大序列长度
-    # 每次rollout时，都会重新分配kv cache
+    total_len = max_gen_len + max_prompt_len # NOTE: 最大序列长度, 每次total_len不一样，需要重新申请kv cache
+    # 每次rollout时，都会重新动态分配kv cache, 以节省GPU内存
     model.init_kv_cache(
         max_batch_size=batch_size,
         max_seq_len=total_len,
@@ -196,6 +196,7 @@ def normalize_rewards_per_group(episodes: List[Episode]) -> List[Episode]:
         for episode in group:
             normalized_reward = (episode.reward - mean_reward) / (std_reward + 1e-4)
             # 更新episode的reward
+            # episode.reward = normalized_reward, 为何不这样使用
             episode = dataclasses.replace(episode, reward=normalized_reward)
             output.append(episode)
     return output
@@ -217,7 +218,7 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     = log(sum(exp(logit_j))) - sum_{i} { p_i * logit_i }  
      
     entropy = logsumexp(logit_j) - sum_{i} {p_i*log(p_i)} 
-    NOTE: 这样变换的好处是，logsumexp是稳定的，而sum(p_i*log(p_i))可能不稳定，因为log(p_i)可能很小，导致乘以p_i后变成0，而logsumexp不会。
+    NOTE: 这样变换的好处是，logsumexp是稳定的，而sum(p_i*log(p_i))可能不稳定，因为p_i可能很小,log(p_i)可能接近-inf，导致乘以p_i后变成-inf，而logsumexp不会。
     """
     # entropy: [batch_size, seq_len]
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
@@ -237,6 +238,7 @@ def update_policy(
     """Update the policy using the GRPO algorithm."""
     # episodes: [batch_size*num_answer_per_question]
     episodes = normalize_rewards_per_group(episodes)
+    # 长度相近的episode放在一起, 以减小seq_len不同导致的padding太多
     # sort episodes by token length for efficient (micro-)batching, 以减小seq_len不同导致的padding太多
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
@@ -289,6 +291,10 @@ def update_policy(
             logits = model.forward(input_token_ids).float()
 
         """
+        $$
+        \nabla_\theta \log \pi_\theta(a_{i,j}[t]) \cdot A_{i,j}[t]
+        $$
+        
         此处是使用LM cross-entropy loss替代了重要性采样KL散度，因为它们在one-hot的情况下是等价的。
 
         当 $P$ 是 one-hot 编码时：
@@ -311,10 +317,9 @@ def update_policy(
         此处使用了LM cross-entropy loss替代了重要性采样KL散度，因为它们在one-hot的情况下是等价的。
 
 
-        原始重要性采样等价于负逆向KL散度：
+        原始重要性采样等价于 = exp(负逆向KL散度)：
         ```math
         -KL(Q||P)=
-
         -D_{\text{KL}}(Q \| P) = - \sum_{y} Q(y) \log \frac{Q(y)}{P(y)}
         其中 $Q(y)$ 是采样得到的旧分布, $P(y)$ 是新模型预测的分布
 
@@ -325,13 +330,18 @@ def update_policy(
         -KL(Q||P)= H(Q) - H(Q, P)
 
         H(Q)是老分布的熵，H(Q, P)是新分布和旧分布的交叉熵
-        此处忽略H(Q),因此重要性采样 = -反向KL散度 = -交叉熵loss。
+        此处忽略H(Q),因此: log(重要性采样) = -反向KL散度 = -交叉熵loss。
+        
+        正向：KL(P||Q)=sum_{x}{p*log(p/q)}， p为真实label，q为模型, mode covering                    
+        反向：KL(Q||P)=sum_{x}{q*log(q/p)}， p为真实label，q为模型, mode seeking           
 
         """
+        # 6. Compute policy gradient using PPO surrogate objective. For simplicity, we will only do one policy update per iteration, in which the gradient of the PPO objective is equivalent to following vanilla policy gradient estimation (per token).
+
         # logits: [micro_batch_size, batch_max_length-1, vocab_size]
         # target: [micro_batch_size, batch_max_length-1]
         # lm_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
-        lm_cross_entropy_loss = torch.nn.functional.cross_entropy(
+        log_probs = torch.nn.functional.cross_entropy(
             input=logits.reshape(-1, logits.size(-1)),
             target=target_token_ids.reshape(-1),
             ignore_index=pad_token_id,
@@ -351,10 +361,14 @@ def update_policy(
         # 没有了重要性采样, 但正规的ppo是使用的是 importance sampling = log(new_prob/old_prob)
         # 而此处用的是 = cross_entropy_loss = log_probs
         # 
+        """
+        标准的原始policy gradient公式
+        gradient( log(pai(a_{i,j}[t])) * Advantage_{i,j}[t] )
+        """
         # lm_cross_entropy_loss: [micro_batch_size, batch_max_length-1]
         # batch_advantages: [micro_batch_size]
         # obj: [micro_batch_size, batch_max_length-1]
-        obj = (-lm_cross_entropy_loss) * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
+        obj = (-log_probs) * batch_advantages[:, None]  # loss为 - log_probs * reward, 即总loss为loss关于reward的加权
         # per-token objective
         # target_masks; [micro_batch_size, batch_max_length-1]
         loss =  (obj * target_masks).sum() / num_target_tokens
@@ -381,7 +395,7 @@ def clip_grad_norm_(parameters, max_norm):
     # 1. 计算所有参数的梯度范数（总梯度大小）
     total_norm = compute_gradient_norm(parameters)
     
-    # 2. 如果梯度范数超过最大值，按比例缩放
+    # 2. 如果梯度范数超过最大值，按最大norm的比例缩放
     if total_norm > max_norm:
         clip_coef = max_norm / (total_norm + 1e-6)
         for param in parameters:

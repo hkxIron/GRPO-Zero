@@ -463,7 +463,7 @@ class Transformer(nn.Module):
         # only need the hidden state of the last token
         # to predict the next token
         # h: (batch_size, seq_len, hidden_dim), 只取最后一个token的hidden state
-        # => h:[batch_size, seq_len=1, dim]
+        # => h:[batch_size, seq_len=-1, dim]
         h = h[:, -1:, :]
         h = self.norm(h)
 
@@ -478,7 +478,7 @@ class Transformer(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ):
-        # 分别初始化各层的kv cache
+        # 分别初始化各layer层的kv cache
         for layer in self.layers:
             layer.self_attn.init_kv_cache(max_batch_size, max_seq_len, dtype=dtype, device=device)
 
