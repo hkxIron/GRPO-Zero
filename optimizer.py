@@ -1,4 +1,5 @@
 import math
+from typing import List
 
 import torch
 from torch.optim import AdamW
@@ -162,8 +163,9 @@ class MemoryEfficientAdamW(AdamW):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-        # param_groups 是一个字典列表，每个字典包含一组参数和对应的优化器配置。它允许对模型的不同部分使用不同的超参数。
+        # NOTE: param_groups 是一个字典列表，每个字典包含一组参数和对应的优化器配置。它允许对模型的不同部分使用不同的超参数。
         for group in self.param_groups:
+            # 每个group中的参数与lr均不一样
             params_with_grad = []
             grads = []
             exp_avgs = []
@@ -181,17 +183,17 @@ class MemoryEfficientAdamW(AdamW):
                 grads.append(p.grad)
 
                 # Initialize state if needed
-                state = self.state[p] # 给当前的参数p创建一个状态字典
-                if len(state) == 0:
+                state = self.state[p] # 取出当前的参数p的状态字典, 若为空，则创建，由于是使用defaultdict初始化，因此可以取到任意key的值{}
+                if len(state) == 0: # 初始化stat_dict
                     state["step"] = 0
                     # Store optimizer states on CPU with pinned memory
-                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备上存优化器, 但是会pin_memory,即锁页内存加速访问
+                    device = "cpu" # NOTE: 在cpu上存储优化器状态, 并不是在param所在的设备(如gpu)上存优化器状态, 但是会pin_memory, 即锁页内存加速访问,防止被交换到硬盘
                     pin_memory = self.pin_memory
                     # 32位存储优化器状态
                     dtype = torch.float32
-                    # 将优化器状态存储在CPU上，以节省GPU内存
-                    state["exp_avg"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
-                    state["exp_avg_sq"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
+                    # NOTE:将优化器状态存储在CPU上，以节省GPU内存
+                    state["exp_avg"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype) # NOTE: 一阶动量,一般需要使用高精度fp32来存储
+                    state["exp_avg_sq"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype) # NOTE: 二阶动量
                     if group["amsgrad"]:
                         state["max_exp_avg_sq"] = torch.zeros_like(p.data, device=device, pin_memory=pin_memory, dtype=dtype)
 
@@ -202,7 +204,7 @@ class MemoryEfficientAdamW(AdamW):
                 if group["amsgrad"]:
                     max_exp_avg_sqs.append(state["max_exp_avg_sq"]) # 最大二阶动量
 
-                state["step"] += 1
+                state["step"] += 1 # 步数加1
                 state_steps.append(state["step"])
 
             # NOTE:计算好优化器状态后,原地更新训练参数p的值
@@ -211,7 +213,7 @@ class MemoryEfficientAdamW(AdamW):
                 params_with_grad,
                 grads,
                 exp_avgs, # NOTE: 一阶动量, exp_avg存在CPU内存中
-                exp_avg_sqs,
+                exp_avg_sqs, # NOTE: 二阶动量
                 max_exp_avg_sqs,
                 state_steps,
                 amsgrad=group["amsgrad"],
@@ -226,10 +228,10 @@ class MemoryEfficientAdamW(AdamW):
 
     def _memory_efficient_update(
         self,
-        params,
-        grads,
-        exp_avgs, # NOTE: 一阶动量, exp_avg存在CPU内存中
-        exp_avg_sqs, # NOTE: 二阶动量，exp_avg_sq存在CPU内存中
+        params:List[torch.Tensor],
+        grads:List[torch.Tensor],
+        exp_avgs:List[torch.Tensor], # NOTE: 一阶动量, exp_avg存在CPU内存中
+        exp_avg_sqs:List[torch.Tensor], # NOTE: 二阶动量，exp_avg_sq存在CPU内存中
         max_exp_avg_sqs,
         state_steps,
         amsgrad,
@@ -244,20 +246,21 @@ class MemoryEfficientAdamW(AdamW):
         Uses pinned memory for efficient CPU-to-GPU transfer of optimizer states.
         """
         for i, param in enumerate(params):
-            grad = grads[i]
+            grad = grads[i] # NOTE: 取出params对应的梯度
             param_device = param.device
 
             # NOTE: 一阶动量, exp_avg存在CPU内存中, 需要移动到参数param所在的GPU中
-            # Access optimizer states - they'll transfer efficiently due to pin_memory, 禁用换页
+            #   Access optimizer states - they'll transfer efficiently due to pin_memory, 禁用换页
+            #  将m1/v1从cpu移到gpu, exp_avg为gpu上， exp_avgs[i]在cpu上
             exp_avg = exp_avgs[i].to(param_device, non_blocking=True) # 将优化器状态从CPU memory -> GPU memory
             exp_avg_sq = exp_avg_sqs[i].to(param_device, non_blocking=True)
 
             step = state_steps[i]
 
-            # NOTE: GPU上原地计算, 不产生中间变量
+            # NOTE: GPU上原地计算, 不产生中间变量, 避免内存的申请与释放
             # Decay the first and second moment running averages
-            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1) # m1 = m1 * beta1 + grad * (1 - beta1)
-            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2) # v1 = v1 * beta2 + grad^2 * (1 - beta2)
+            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1) # NOTE: m1 = m1 * beta1 + grad * (1 - beta1)
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2) # NOTE: v1 = v1 * beta2 + grad^2 * (1 - beta2)
 
             if amsgrad:
                 # Access max_exp_avg_sq - transfers efficiently with pin_memory
@@ -279,10 +282,14 @@ class MemoryEfficientAdamW(AdamW):
             if weight_decay != 0:
                 param.mul_(1 - lr * weight_decay) # param = param * (1 - lr * weight_decay)
 
-            # Update parameters (directly on GPU), NOTE:均为原地操作，原因是原地操作可以节省内存，不需要再分配GPU内存
+            # NOTE: Update parameters (directly on GPU), 均为原地操作，原因是原地操作可以节省内存，不需要再分配GPU内存
             # NOTE:最重要的操作，原地更新参数p的值
-            param.addcdiv_(exp_avg, denom, value=-step_size) # param = param - step_size * m1 / denom = param - step_size * m1 / (v1^0.5 + eps)
+            #  exp_avg即m1
+            #  param = param - step_size * m1 / denorm = param - step_size * m1 / (v1 ^ 0.5 + eps)
+            param.addcdiv_(exp_avg, denom, value=-step_size) #
 
             # Store optimizer states back to CPU
-            exp_avgs[i].copy_(exp_avg, non_blocking=True) # NOTE: 将优化器状态exp_avgs从GPU memory -> CPU memory, 然后释放GPU memory
-            exp_avg_sqs[i].copy_(exp_avg_sq, non_blocking=True)
+            # NOTE: 将优化器状态exp_avgs=m1从GPU memory -> CPU memory, 然后释放GPU memory
+            #  将m1/v1从gpu移到cpu, exp_avg为gpu上， exp_avgs[i]在cpu上, 注意：即使不使用cpu/gpu之间的转换，仍需要将optimizer state缓存到cpu中，以减小gpu内存压力
+            exp_avgs[i].copy_(src=exp_avg, non_blocking=True)
+            exp_avg_sqs[i].copy_(src=exp_avg_sq, non_blocking=True)
